@@ -8,12 +8,13 @@ import (
 
 	"gorush/internal/handler"
 	"gorush/internal/middleware"
+	"gorush/internal/redisx"
 	"gorush/internal/repository"
 	"gorush/internal/service"
 )
 
-// New 构造路由，注入依赖（DB）。
-func New(db *gorm.DB) *gin.Engine {
+// New 构造路由，注入依赖（DB、Redis）。
+func New(db *gorm.DB, redisStore *redisx.Store) *gin.Engine {
 	// 不用 gin.Default()，避免它自带的两个中间件（格式不可控、没有 request_id）。
 	r := gin.New()
 	r.Use(middleware.RequestID()) // 必须最先：给后续中间件 / handler 提供 req_id
@@ -27,7 +28,7 @@ func New(db *gorm.DB) *gin.Engine {
 	}
 
 	// ---------- /health ----------
-	r.GET("/health", handler.NewHealthHandler(db).Handle)
+	r.GET("/health", handler.NewHealthHandler(db, redisStore).Handle)
 
 	// ---------- 装配 Repository / Service / Handler ----------
 	shopTypeRepo := repository.NewShopTypeRepository(db)
@@ -35,11 +36,11 @@ func New(db *gorm.DB) *gin.Engine {
 	shopTypeH := handler.NewShopTypeHandler(shopTypeSvc)
 
 	shopRepo := repository.NewShopRepository(db)
-	shopSvc := service.NewShopService(shopRepo)
+	shopSvc := service.NewShopService(shopRepo, redisStore)
 	shopH := handler.NewShopHandler(shopSvc)
 
 	voucherRepo := repository.NewVoucherRepository(db)
-	voucherSvc := service.NewVoucherService(voucherRepo, shopRepo)
+	voucherSvc := service.NewVoucherService(voucherRepo, shopSvc, redisStore)
 	voucherH := handler.NewVoucherHandler(voucherSvc)
 
 	reviewRepo := repository.NewReviewRepository(db)
@@ -60,6 +61,8 @@ func New(db *gorm.DB) *gin.Engine {
 	{
 		v1.GET("/shop-types", shopTypeH.List)
 		v1.GET("/shops", shopH.List)
+		v1.GET("/shops/nearby", shopH.Nearby)
+		v1.GET("/shops/hot", shopH.Hot)
 		v1.GET("/shops/:id", shopH.GetByID)
 		v1.GET("/shops/:id/vouchers", voucherH.ListByShop)
 		v1.GET("/shops/:id/reviews", reviewH.ListByShop)

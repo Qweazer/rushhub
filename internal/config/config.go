@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -22,6 +23,11 @@ type Config struct {
 	DBUser     string
 	DBPassword string
 	DBName     string
+
+	RedisAddr     string
+	RedisPassword string
+	RedisDB       int
+	RedisTimeout  time.Duration
 }
 
 // Load 读取 .env（如果存在），然后把所有配置汇总成一个 Config。
@@ -34,6 +40,17 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	redisDB, err := getEnvInt("REDIS_DB", 0)
+	if err != nil {
+		return nil, err
+	}
+	redisTimeoutMS, err := getEnvInt("REDIS_TIMEOUT_MS", 200)
+	if err != nil {
+		return nil, err
+	}
+	if redisTimeoutMS <= 0 {
+		return nil, fmt.Errorf("env REDIS_TIMEOUT_MS must be > 0")
+	}
 
 	cfg := &Config{
 		ServerPort: getEnv("SERVER_PORT", "18080"),
@@ -43,6 +60,11 @@ func Load() (*Config, error) {
 		DBUser:     getEnv("DB_USER", "gorush"),
 		DBPassword: getEnv("DB_PASSWORD", "gorushpass"),
 		DBName:     getEnv("DB_NAME", "gorush"),
+
+		RedisAddr:     getEnv("REDIS_ADDR", "127.0.0.1:16379"),
+		RedisPassword: getEnv("REDIS_PASSWORD", ""),
+		RedisDB:       redisDB,
+		RedisTimeout:  time.Duration(redisTimeoutMS) * time.Millisecond,
 	}
 	return cfg, nil
 }

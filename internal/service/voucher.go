@@ -2,21 +2,44 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"math/rand/v2"
 	"time"
 
 	"gorush/internal/httpx"
 	"gorush/internal/model"
+	"gorush/internal/redisx"
 	"gorush/internal/repository"
 )
 
-// VoucherService 营销活动业务。
-type VoucherService struct {
-	Repo     *repository.VoucherRepository
-	ShopRepo *repository.ShopRepository
+const voucherCacheTTL = 10 * time.Minute
+
+type voucherData interface {
+	ListByShop(context.Context, uint64) ([]model.Voucher, error)
+	ListSeckillStocksByShop(context.Context, uint64) ([]model.SeckillVoucher, error)
+	CreateSeckill(context.Context, repository.SeckillInput) (uint64, error)
 }
 
-func NewVoucherService(vr *repository.VoucherRepository, sr *repository.ShopRepository) *VoucherService {
-	return &VoucherService{Repo: vr, ShopRepo: sr}
+type voucherCache interface {
+	Get(context.Context, string) (redisx.CacheResult, error)
+	Set(context.Context, string, []byte, time.Duration) error
+	Delete(context.Context, string) error
+}
+
+type shopLookup interface {
+	LookupByID(context.Context, uint64) (*model.Shop, error)
+}
+
+// VoucherService 营销活动业务。
+type VoucherService struct {
+	Repo       voucherData
+	ShopLookup shopLookup
+	Cache      voucherCache
+}
+
+func NewVoucherService(repo voucherData, shops shopLookup, cache voucherCache) *VoucherService {
+	return &VoucherService{Repo: repo, ShopLookup: shops, Cache: cache}
 }
 
 // VoucherGrouped 商家营销活动分组视图。
@@ -47,11 +70,13 @@ type SeckillView struct {
 // ListByShop 返回某商家全部活动，按是否在 seckill_vouchers 分组。
 func (s *VoucherService) ListByShop(ctx context.Context, shopID uint64) (*VoucherGrouped, error) {
 	// 先校验商家存在 —— 404 否则用户拿到空结果不知道是商家不存在还是没券。
-	if _, err := s.ShopRepo.GetByID(ctx, shopID); err != nil {
-		if err == repository.ErrShopNotFound {
-			return nil, httpx.NewNotFound("shop not found")
-		}
-		return nil, httpx.NewInternal(err)
+	if _, err := s.ShopLookup.LookupByID(ctx, shopID); err != nil {
+		return nil, shopLookupError(err, httpx.NewNotFound("shop not found"))
+	}
+
+	key := redisx.ShopVouchersKey(shopID)
+	if cached, ok := s.loadCached(ctx, shopID, key); ok {
+		return cached, nil
 	}
 
 	vouchers, err := s.Repo.ListByShop(ctx, shopID)
@@ -62,6 +87,46 @@ func (s *VoucherService) ListByShop(ctx context.Context, shopID uint64) (*Vouche
 	if err != nil {
 		return nil, httpx.NewInternal(err)
 	}
+	out := groupVouchers(vouchers, stocks)
+	if data, err := json.Marshal(out); err != nil {
+		logVoucherCacheError(ctx, "cache_marshal", key, shopID, err)
+	} else if err := s.Cache.Set(ctx, key, data, jitteredVoucherTTL()); err != nil {
+		logVoucherCacheError(ctx, "redis_set", key, shopID, err)
+	}
+	return out, nil
+}
+
+func (s *VoucherService) loadCached(ctx context.Context, shopID uint64, key string) (*VoucherGrouped, bool) {
+	result, err := s.Cache.Get(ctx, key)
+	if err != nil {
+		logVoucherCacheError(ctx, "redis_get", key, shopID, err)
+		return nil, false
+	}
+	if result.State != redisx.CacheHit {
+		return nil, false
+	}
+
+	var grouped VoucherGrouped
+	if err := json.Unmarshal(result.Data, &grouped); err != nil {
+		logVoucherCacheError(ctx, "cache_corruption", key, shopID, err)
+		if err := s.Cache.Delete(ctx, key); err != nil {
+			logVoucherCacheError(ctx, "redis_delete", key, shopID, err)
+		}
+		return nil, false
+	}
+	return &grouped, true
+}
+
+func logVoucherCacheError(ctx context.Context, operation, key string, shopID uint64, err error) {
+	httpx.FromContext(ctx).Error("voucher cache operation failed",
+		"operation", operation,
+		"key", key,
+		"shop_id", shopID,
+		"error", err,
+	)
+}
+
+func groupVouchers(vouchers []model.Voucher, stocks []model.SeckillVoucher) *VoucherGrouped {
 	stockMap := make(map[uint64]model.SeckillVoucher, len(stocks))
 	for _, sv := range stocks {
 		stockMap[sv.VoucherID] = sv
@@ -84,20 +149,34 @@ func (s *VoucherService) ListByShop(ctx context.Context, shopID uint64) (*Vouche
 			EndTime:       v.EndTime,
 		}
 		if sv, ok := stockMap[v.ID]; ok {
-			out.Seckill = append(out.Seckill, SeckillView{
-				VoucherView: view,
-				Stock:       sv.Stock,
-			})
+			out.Seckill = append(out.Seckill, SeckillView{VoucherView: view, Stock: sv.Stock})
 			continue
 		}
-		// 没库存外挂的：type=1 普通券，type=3 推广
 		if v.VoucherType == model.VoucherTypeNormal {
 			out.Normal = append(out.Normal, view)
 		} else {
 			out.Promotion = append(out.Promotion, view)
 		}
 	}
-	return out, nil
+	return out
+}
+
+func jitteredVoucherTTL() time.Duration {
+	return voucherCacheTTL + time.Duration(rand.IntN(301))*time.Second
+}
+
+func shopLookupError(err error, missing error) error {
+	if errors.Is(err, repository.ErrShopNotFound) {
+		return missing
+	}
+	var appErr *httpx.AppError
+	if errors.As(err, &appErr) {
+		if appErr.Code == httpx.CodeNotFound {
+			return missing
+		}
+		return err
+	}
+	return httpx.NewInternal(err)
 }
 
 // CreateSeckillInput 创建秒杀活动入参（来自 HTTP）。
@@ -125,11 +204,8 @@ func (s *VoucherService) CreateSeckill(ctx context.Context, in CreateSeckillInpu
 	if !in.EndTime.After(in.BeginTime) {
 		return 0, httpx.NewBadRequest("end_time must be after begin_time")
 	}
-	if _, err := s.ShopRepo.GetByID(ctx, in.ShopID); err != nil {
-		if err == repository.ErrShopNotFound {
-			return 0, httpx.NewBadRequest("shop_id not exist")
-		}
-		return 0, httpx.NewInternal(err)
+	if _, err := s.ShopLookup.LookupByID(ctx, in.ShopID); err != nil {
+		return 0, shopLookupError(err, httpx.NewBadRequest("shop_id not exist"))
 	}
 
 	// 2) 调 repo（事务写两张表）
@@ -143,6 +219,10 @@ func (s *VoucherService) CreateSeckill(ctx context.Context, in CreateSeckillInpu
 	})
 	if err != nil {
 		return 0, httpx.NewInternal(err)
+	}
+	key := redisx.ShopVouchersKey(in.ShopID)
+	if err := s.Cache.Delete(ctx, key); err != nil {
+		logVoucherCacheError(ctx, "redis_delete", key, in.ShopID, err)
 	}
 	return id2, nil
 }

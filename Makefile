@@ -1,4 +1,4 @@
-.PHONY: up down logs ps migrate seed run build vet fmt tidy clean
+.PHONY: up down logs ps migrate seed reindex run build vet fmt tidy clean test-redis verify
 
 # ---------- Docker ----------
 up:
@@ -37,14 +37,34 @@ migrate:
 seed:
 	go run ./cmd/seed
 
-# 一键复位：删库重建 → migrate → seed
+reindex:
+	go run ./cmd/reindex
+
+# ---------- Verification ----------
+test-redis:
+	REDIS_TEST_ADDR=127.0.0.1:16379 go test ./internal/redisx -count=1
+
+verify:
+	@set -e; \
+	tmp_dir=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp_dir"' EXIT; \
+	go test ./...; \
+	go vet ./...; \
+	go build -o "$$tmp_dir/server" ./cmd/server; \
+	go build -o "$$tmp_dir/migrate" ./cmd/migrate; \
+	go build -o "$$tmp_dir/seed" ./cmd/seed; \
+	go build -o "$$tmp_dir/reindex" ./cmd/reindex
+
+# 一键复位：删库重建 → migrate → seed → reindex
 reset:
 	docker compose down -v
 	docker compose up -d
-	@echo "waiting for MySQL..."
+	@echo "waiting for MySQL and Redis..."
 	@for i in $$(seq 1 30); do \
-	  h=$$(docker inspect -f '{{.State.Health.Status}}' gorush-mysql 2>/dev/null); \
-	  if [ "$$h" = "healthy" ]; then echo "MySQL ready"; break; fi; \
+	  mysql=$$(docker inspect -f '{{.State.Health.Status}}' gorush-mysql 2>/dev/null); \
+	  redis=$$(docker inspect -f '{{.State.Health.Status}}' gorush-redis 2>/dev/null); \
+	  if [ "$$mysql" = "healthy" ] && [ "$$redis" = "healthy" ]; then echo "MySQL and Redis ready"; exit 0; fi; \
 	  sleep 1; \
-	done
-	$(MAKE) migrate seed
+	done; \
+	echo "MySQL and Redis did not become ready" >&2; exit 1
+	$(MAKE) migrate seed reindex

@@ -23,5 +23,21 @@ services:
       timeout: 3s
       retries: 20
 
+  redis:
+    image: redis:7.4-alpine
+    container_name: gorush-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   mysql_data:
+  redis_data:

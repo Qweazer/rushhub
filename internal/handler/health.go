@@ -9,15 +9,18 @@ import (
 	"gorm.io/gorm"
 )
 
-// HealthHandler 健康检查处理单元。
-// 从函数升级为 struct 的原因：依赖变多（DB）后，struct 持有依赖是 Go 的自然形态。
-// 仍然没有引入 interface —— Day 1 不做"为抽象而抽象"。
-type HealthHandler struct {
-	DB *gorm.DB
+type redisPinger interface {
+	Ping(context.Context) error
 }
 
-func NewHealthHandler(db *gorm.DB) *HealthHandler {
-	return &HealthHandler{DB: db}
+// HealthHandler 健康检查处理单元，持有 MySQL 与 Redis 探活依赖。
+type HealthHandler struct {
+	DB    *gorm.DB
+	Redis redisPinger
+}
+
+func NewHealthHandler(db *gorm.DB, redis redisPinger) *HealthHandler {
+	return &HealthHandler{DB: db, Redis: redis}
 }
 
 // Handle 返回进程存活 + DB 连通性。
@@ -27,16 +30,25 @@ func (h *HealthHandler) Handle(c *gin.Context) {
 	defer cancel()
 
 	dbStatus := "ok"
+	redisStatus := "ok"
+	status := "ok"
 	httpStatus := http.StatusOK
 	if err := h.DB.WithContext(ctx).Exec("SELECT 1").Error; err != nil {
 		dbStatus = "down: " + err.Error()
+		status = "down"
+		httpStatus = http.StatusServiceUnavailable
+	}
+	if err := h.Redis.Ping(ctx); err != nil {
+		redisStatus = "down: " + err.Error()
+		status = "down"
 		httpStatus = http.StatusServiceUnavailable
 	}
 
 	c.JSON(httpStatus, gin.H{
-		"status": "ok",
+		"status": status,
 		"checks": gin.H{
-			"db": dbStatus,
+			"db":    dbStatus,
+			"redis": redisStatus,
 		},
 	})
 }
