@@ -1,6 +1,6 @@
 # GoRush
 
-> 类似“大众点评”的本地生活服务平台后端。**Day 2 版本**在 Gin + MySQL + GORM 之上加入 Redis 缓存、GEO 附近商家和 ZSet 热度榜。
+> 类似“大众点评”的本地生活服务平台后端。**Day 3 版本**在 Day 2 之上加入 Redis Lua 原子扣减、RocketMQ 异步落库、Worker 重试、令牌桶限流、幂等键和 seckillctl 管控工具。
 
 ## 项目状态
 
@@ -8,8 +8,27 @@
 |---|---|---|
 | 1 | Gin + GORM + MySQL，基础商家、券、评价、收藏和秒杀 | ✅ |
 | 2 | Redis Cache / GEO / ZSet，缓存降级、健康检查和重建索引 | ✅ |
-| 3+ | Lua / RocketMQ / 限流 / 幂等 / 分布式锁 | 待实现 |
+| 3 | Lua 原子扣减 + RocketMQ 异步 + Worker 重试 + 限流 + 幂等 + seckillctl | ✅ |
 | 4+ | Prometheus / pprof / 压测 | 待实现 |
+
+## Day 3 新增接口
+
+| Method | Path | 说明 |
+|--------|------|------|
+| `POST` | `/api/v1/seckill/:voucher_id` | Lua 原子扣减 + 首次 MQ 投递，返 `202 ACCEPTED` |
+| `GET`  | `/api/v1/orders/:id` | MySQL CREATED 优先，缺则回退到 Redis reservation（PENDING/ACCEPTED/CREATED/）|
+
+## 运维工具 `cmd/seckillctl`
+
+```bash
+make seckill-pause      # 暂停整个秒杀（Lua 返 QualificationPaused）
+make seckill-status     # 看当前 pending / inflight / gate 状态
+make seckill-rebuild    # 从 MySQL 重建 Redis Lua 状态（需先 pause）
+make seckill-resume     # 恢复（要求 pending + inflight 都 = 0）
+```
+
+详见 [`docs/DAY3-GUIDE.md`](docs/DAY3-GUIDE.md) 和 [`docs/DAY1-DAY2-GUIDE.md`](docs/DAY1-DAY2-GUIDE.md)。
+容器化踩坑实录：[`docs/DAY3-DEBUGGING.md`](docs/DAY3-DEBUGGING.md)。
 
 ## 目录结构
 
