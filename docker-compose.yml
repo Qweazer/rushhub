@@ -38,6 +38,59 @@ services:
       timeout: 3s
       retries: 20
 
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.0.0
+    container_name: gorush-rocketmq-namesrv
+    restart: unless-stopped
+    command: sh mqnamesrv
+    ports:
+      - "9876:9876"
+    volumes:
+      - ./docker/rocketmq/namesrv_logs:/home/rocketmq/logs
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'kill -0 1 && exec 3<>/dev/tcp/127.0.0.1/9876'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.0.0
+    container_name: gorush-rocketmq-broker
+    restart: unless-stopped
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_healthy
+    environment:
+      NAMESRV_ADDR: rocketmq-namesrv:9876
+    command: sh mqbroker --enable-proxy -c /home/rocketmq/rocketmq-5.0.0/conf/broker.conf
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+      - "10912:10912"
+      - "8080:8080"
+      - "8081:8081"
+    # 用 bind mount 而不是 named volume：
+    # Docker Desktop (macOS x86_64 emulation) 下 named volume 会让 broker 在
+    # ScheduleMessageService.persist() 阶段 NPE（exit 255）。
+    # 改为 bind mount 后 broker 正常启动并打印 "boot success"。
+    volumes:
+      - ./docker/rocketmq/broker.conf:/home/rocketmq/rocketmq-5.0.0/conf/broker.conf:ro
+      - ./docker/rocketmq/broker_logs:/home/rocketmq/logs
+      - ./docker/rocketmq/broker_store:/home/rocketmq/store
+    healthcheck:
+      # Go SDK 通过 RocketMQ 5.x Proxy (gRPC 8081) 与 broker 通信。
+      # 只测 10911 不够：broker 进程活了但 proxy 没就绪时 SDK 仍会发不出去。
+      # 这里同时探测 broker (10911) 和 proxy (8081)，全部可达才视为 ready。
+      test:
+        - CMD-SHELL
+        - bash -ec 'exec 3<>/dev/tcp/127.0.0.1/10911 && exec 4<>/dev/tcp/127.0.0.1/8081'
+      interval: 5s
+      timeout: 3s
+      retries: 40
+      start_period: 20s
+
 volumes:
   mysql_data:
   redis_data:
+  rocketmq_namesrv_logs:

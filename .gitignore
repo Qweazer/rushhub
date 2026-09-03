@@ -9,6 +9,11 @@
 # 日志
 *.log
 
+# RocketMQ bind-mount 数据目录（运行时落盘，不入仓）
+docker/rocketmq/broker_logs/
+docker/rocketmq/broker_store/
+docker/rocketmq/namesrv_logs/
+
 # IDE
 .idea/
 .vscode/
